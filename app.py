@@ -6,7 +6,7 @@ import os
 st.set_page_config(page_title="Agentic Research Assistant", layout="centered")
 
 # App Header
-st.title("📄 Agentic Research Assistant")
+st.title("📄Scholar Research Assistant")
 st.write("Automatically research papers from ArXiv and generate a summarized report.")
 
 # Session State for Chat History and Agent State
@@ -59,7 +59,7 @@ if prompt := st.chat_input("Type your research topic or follow-up..."):
                 
                 response = f"I found these 10 recent papers on **{prompt}**. Please choose which ones you'd like me to analyze (e.g., enter '1, 3, 5, 6, 7, 8' to pick 6, or 'all' for all 10):\n\n"
                 for i, p in enumerate(result["paper_results"]):
-                    response += f"{i+1}. **{p['title']}** ({p['published']})\n"
+                    response += f"{i+1}. **{p['title']}** ({p['published']})\n   *Summary:* {p['summary'][:200]}...\n\n"
                 
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})

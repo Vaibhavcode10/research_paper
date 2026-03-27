@@ -13,10 +13,17 @@ import concurrent.futures
 # Load Environment Variables
 load_dotenv()
 
+# Resolve API key from supported environment variables
+gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if not gemini_api_key:
+    raise EnvironmentError(
+        "Gemini API key is required. Set GEMINI_API_KEY or GOOGLE_API_KEY in your environment (e.g. in .env)."
+    )
+
 # Initialize the model with the requested version
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash", 
-    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    api_key=gemini_api_key,
     max_output_tokens=25000
 )
 
