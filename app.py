@@ -1,5 +1,6 @@
 import streamlit as st
-from graph import app
+from graph import app, llm
+from langchain_core.prompts import ChatPromptTemplate
 import os
 
 # Page Config
@@ -18,12 +19,103 @@ if "research_state" not in st.session_state:
         "papers": [],
         "selected_indices": None,
         "selected_papers": [],
+        "paper_summaries": {},
         "ideas": [],
         "final_paper_path": None,
         "final_tex_path": None,
         "pdf_data": None,
         "tex_data": None
     }
+
+# Helper to get short abstract + keywords from the LLM
+def get_short_abstract_and_keywords(abstract: str, paper_index: int) -> dict:
+    cache = st.session_state.research_state.get("paper_summaries", {})
+    if paper_index in cache:
+        return cache[paper_index]
+
+    prompt_template = """
+Given the paper abstract, provide these fields:
+- Short Abstract (2-3 sentences)
+- Main Focus (e.g., NLP, computer vision, graph neural networks, face recognition, etc.)
+- Keywords
+
+Output format:
+Short Abstract: ...
+Main Focus: ...
+Keywords: kw1, kw2, kw3, ...
+
+Abstract:
+{abstract}
+"""
+
+    prompt = ChatPromptTemplate.from_template(prompt_template)
+    chain = prompt | llm
+    try:
+        response = chain.invoke({"abstract": abstract})
+        content = response.content.strip()
+    except Exception as e:
+        content = f"(AI summary unavailable: {e})"
+
+    summary = {
+        "short_abstract": "",
+        "main_focus": "",
+        "keywords": "",
+        "raw": content
+    }
+
+    for line in content.splitlines():
+        parts = line.split(":", 1)
+        if len(parts) != 2:
+            continue
+        key = parts[0].strip().lower()
+        value = parts[1].strip()
+        if key == "short abstract":
+            summary["short_abstract"] = value
+        elif key == "main focus":
+            summary["main_focus"] = value
+        elif key == "keywords":
+            summary["keywords"] = value
+
+    # if model gave minimal plain text, fallback the raw content
+    if not summary["short_abstract"]:
+        summary["short_abstract"] = content
+
+    cache[paper_index] = summary
+    st.session_state.research_state["paper_summaries"] = cache
+    return summary
+
+
+def compute_match_percentage(term: str, summary: dict, paper: dict) -> int:
+    if not term:
+        return 0
+
+    term = term.strip().lower()
+    focus = summary.get("main_focus", "").lower()
+    keywords = summary.get("keywords", "").lower()
+    title = paper.get("title", "").lower()
+    abstract = paper.get("summary", "").lower()
+
+    score = 0
+
+    if term in focus:
+        score += 40
+    if term in keywords:
+        score += 30
+    if term in title:
+        score += 20
+    if term in abstract:
+        score += 10
+
+    # If no direct full-term match but partial token matches exist, give partial score.
+    term_tokens = term.split()
+    token_matches = 0
+    for tok in term_tokens:
+        if tok and (tok in focus or tok in keywords or tok in title or tok in abstract):
+            token_matches += 1
+    if token_matches and score == 0:
+        score = min(100, 20 + 20 * token_matches)
+
+    return min(100, score)
 
 # Display Chat History
 for message in st.session_state.messages:
@@ -57,17 +149,67 @@ if prompt := st.chat_input("Type your research topic or follow-up..."):
                 result = search_papers_node(initial_state)
                 st.session_state.research_state["papers"] = result["paper_results"]
                 
-                response = f"I found these 10 recent papers on **{prompt}**. Please choose which ones you'd like me to analyze (e.g., enter '1, 3, 5, 6, 7, 8' to pick 6, or 'all' for all 10):\n\n"
-                for i, p in enumerate(result["paper_results"]):
-                    response += f"{i+1}. **{p['title']}** ({p['published']})\n   *Summary:* {p['summary'][:200]}...\n\n"
+                response = f"I found these 10 recent papers on **{prompt}**. Expand each to see an AI-generated short abstract, main focus, and keywords. Then choose which ones you'd like me to analyze (e.g., enter '1, 3, 5, 6, 7, 8' to pick 6, or 'all' for all 10).\n\nTip: To narrow to your interest area, type 'filter <topic>' (e.g., 'filter nlp' or 'filter face recognition')."
                 
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
+                
+                # Display papers with expanders for previews
+                search_term = st.session_state.research_state.get("topic", "")
+                for i, p in enumerate(result["paper_results"]):
+                    with st.expander(f"{i+1}. {p['title']} ({p['published']})"):
+                        short_summary = get_short_abstract_and_keywords(p['summary'], i)
+                        match_score = compute_match_percentage(search_term, short_summary, p)
+                        st.markdown(f"**Match Percentage (vs. your topic '{search_term}')**: {match_score}%")
+                        st.markdown("**AI Summary:**")
+                        st.write(short_summary.get("short_abstract", ""))
+                        st.markdown("**Main Focus:**")
+                        st.write(short_summary.get("main_focus", "(not determined)"))
+                        st.markdown("**Keywords:**")
+                        st.write(short_summary.get("keywords", "(none)"))
+                        st.markdown("---")
+                        with st.expander("Show full original abstract"):
+                            st.write(p['summary'])
         # 2. If topic is decided but papers are not selected
         elif not st.session_state.research_state["selected_indices"]:
             try:
                 import re
-                if prompt.lower().strip() == 'all':
+                user_input = prompt.strip()
+                user_input_lc = user_input.lower()
+
+                # Filter mode based on focus or keywords
+                if user_input_lc.startswith("filter"):
+                    filter_term = user_input.split(None, 1)[1].strip() if len(user_input.split(None, 1)) > 1 else ""
+                    if not filter_term:
+                        st.error("Please provide a term to filter by, e.g., 'filter nlp'.")
+                    else:
+                        st.markdown(f"### 📌 Filtering papers for: '{filter_term}'")
+                        matches = 0
+                        for i, p in enumerate(st.session_state.research_state["papers"]):
+                            summary = get_short_abstract_and_keywords(p['summary'], i)
+                            focus = summary.get("main_focus", "").lower()
+                            keywords = summary.get("keywords", "").lower()
+                            if filter_term.lower() in focus or filter_term.lower() in keywords or filter_term.lower() in p['title'].lower() or filter_term.lower() in p['summary'].lower():
+                                matches += 1
+                                match_score = compute_match_percentage(filter_term, summary, p)
+                                with st.expander(f"{i+1}. {p['title']} ({p['published']})"):
+                                    st.markdown(f"**Match Percentage (filter '{filter_term}')**: {match_score}%")
+                                    st.markdown("**Summary:**")
+                                    st.write(summary.get("short_abstract", ""))
+                                    st.markdown("**Main Focus:**")
+                                    st.write(summary.get("main_focus", "(not determined)"))
+                                    st.markdown("**Keywords:**")
+                                    st.write(summary.get("keywords", "(none)"))
+                                    st.markdown("---")
+                                    with st.expander("Show full original abstract"):
+                                        st.write(p['summary'])
+
+                        if matches == 0:
+                            st.info(f"No papers matched '{filter_term}'. Try another keyword like 'nlp' or 'face recognition'.")
+                        st.session_state.messages.append({"role": "assistant", "content": f"Filtered papers by {filter_term}."})
+                        st.stop()
+
+                if user_input_lc == 'all':
                     indices = list(range(len(st.session_state.research_state["papers"])))
                 else:
                     # Robust parsing: extract all numbers from the string
