@@ -54,7 +54,7 @@ Abstract:
         response = chain.invoke({"abstract": abstract})
         content = response.content.strip()
     except Exception as e:
-        content = f"(AI summary unavailable: {e})"
+        content = f"( summary unavailable: {e})"
 
     summary = {
         "short_abstract": "",
